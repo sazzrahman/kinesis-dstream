@@ -9,36 +9,44 @@ from botocore.exceptions import ClientError, EndpointConnectionError
 from dotenv import load_dotenv
 import unittest
 import logging
+from logging.handlers import RotatingFileHandler
 import sys
+from threading import Thread
+import multiprocessing
+from queue import Queue
 
 # define connections
 load_dotenv()
 request_session = requests.Session()
-kinesis_client = boto3.client('firehose', region_name='us-west-2')
-stream_name = os.getenv("KINESIS_STREAM_NAME")
-# define logger
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-formatter = logging.Formatter('%(asctime)s:%(name)s:%(message)s')
-handler = logging.StreamHandler(sys.stdout)
 
-handler.setFormatter(formatter)
-logger.addHandler(handler)
 
-logger.info("Loading function")
+def log_configure(logger_name, log_file_path):
+    logger = logging.getLogger(logger_name)
+    logger.setLevel(logging.INFO)
+    # the format of the log message
+    formatter = logging.Formatter('%(asctime)s:%(name)s:%(message)s')
 
-# kinesis reading function
+    # define a handler for each parallel process
+    handler = RotatingFileHandler(
+        log_file_path, mode='a', maxBytes=1000000)
+    handler.setFormatter(formatter)
+
+    logger.addHandler(handler)
+
+    return logger
+
+
+logger = log_configure('engagments', 'logs/engagement-tasks.log')
 
 
 def get_time_window(now: dt.datetime, lag) -> tuple:
     """
     lag is in seconds
-
     """
     utc_now_ms = math.floor(now.timestamp() * 1000)
     utc_before = now-dt.timedelta(seconds=lag)
     utc_before_ms = math.floor(utc_before.timestamp() * 1000)
-    logger.info(f"lag interval timestamps {utc_before} :: {now}")
+
     return utc_before_ms, utc_now_ms
 
 
@@ -90,6 +98,10 @@ def get_data(properties, engagement_type, now, lag):
             # use current timestamp and lag
             status_code, data = get_http_response(now=now, properties=properties,
                                                   engagement_type=engagement_type, lag=lag, limit=100, after=after)
+            # time stamp for the current interval
+            utc_before = now-dt.timedelta(seconds=lag)
+            logger.info(
+                f"{engagement_type}::lag interval timestamps {utc_before} :: {now}")
         except Exception as e:
             print(e)
             logger.info("waiting few seconds before retrying")
@@ -106,31 +118,22 @@ def get_data(properties, engagement_type, now, lag):
             if data.get('total') != 0:
                 # put data in kinesis stream
                 results = data.get("results")
-                try:
-                    kinesis_client.put_records(
-                        StreamName=stream_name, Data=json.dumps(results), PartitionKey=str(now))
-                    logger.info("Put data in kinesis stream successfully")
-                    logger.info(data)
-                except ClientError:
-                    print("Error while putting data in kinesis stream")
-                    raise Exception("Check kinesis stream name")
-                except EndpointConnectionError:
-                    print("Error while putting data in kinesis stream")
-                    time.sleep(3)
+
+                logger.info(f"{engagement_type}::{data}")
 
             if not after:
                 iterate = False
 
         else:
             logger.error(data)
-            if data.get("category") == 'RATE_LIMITS':
+            if data.get("errorType") == 'RATE_LIMIT':
                 time.sleep(10)
                 # retry the api call with current parameters
                 continue
             else:
                 # raise exception if there is any other error
                 logger.exception("UNPRECEDENTED ERROR :: ", data)
-                raise Exception("Check property values")
+                raise Exception("Exception :: ", data)
 
     # recursively all the function with next timestamp and lag
     begin_time = now
@@ -157,6 +160,19 @@ def poll_data(properties, engagement_type):
 
 
 if __name__ == "__main__":
-    properties = os.getenv("HS_TASK_PROPERTIES").split("|")
-    engagement_type = "tasks"
-    poll_data(properties, engagement_type)
+    engagements = ["tasks", "calls", "meetings", "emails"]
+    # engagements = ["tasks", "calls", "meetings", "emails", "communications"]
+    NUM_THREADS = len(engagements)
+
+    for t in range(NUM_THREADS):
+
+        current_property = os.getenv(
+            f"HS_{engagements[t].upper()}_PROPERTIES")
+        if not current_property:
+            raise Exception(f"Property Not Found :: {current_property}")
+
+        properties = current_property.split("|")
+        # Thread(target=poll_data, args=(properties, engagements[t])).start()
+        p = multiprocessing.Process(
+            target=poll_data, args=(properties, engagements[t]))
+        p.start()
