@@ -36,7 +36,7 @@ def log_configure(logger_name, log_file_path):
     return logger
 
 
-logger = log_configure('engagments', 'logs/engagement-tasks.log')
+logger = log_configure('contacts', 'logs/hs_contacts.log')
 
 
 def get_time_window(now: dt.datetime, lag) -> tuple:
@@ -50,12 +50,12 @@ def get_time_window(now: dt.datetime, lag) -> tuple:
     return utc_before_ms, utc_now_ms
 
 
-def get_http_response(engagement_type, properties, now, limit, after, lag) -> dict:
+def get_http_response(object_type, properties, now, limit, after, lag) -> dict:
     """
     sends GET request to the provided endpoint url
     """
 
-    url = f"https://api.hubapi.com/crm/v3/objects/{engagement_type}/search?"
+    url = f"https://api.hubapi.com/crm/v3/objects/{object_type}/search?"
     token = os.getenv("HS_TOKEN")
 
     before_ms, now_ms = get_time_window(now=now, lag=lag)
@@ -65,10 +65,14 @@ def get_http_response(engagement_type, properties, now, limit, after, lag) -> di
             {
                 "filters": [
                     {
-                        "propertyName": "hs_lastmodifieddate",
+                        "propertyName": "lastmodifieddate",
                         "operator": "BETWEEN",
                         "highValue": f"{now_ms}",
                         "value": f"{before_ms}"
+                    },
+                    {
+                        "propertyName": "home_club",
+                        "operator": "HAS_PROPERTY"
                     }
                 ]
             }
@@ -82,13 +86,12 @@ def get_http_response(engagement_type, properties, now, limit, after, lag) -> di
         'Content-Type': 'application/json'
     }
 
-    response = request_session.request(
-        "POST", url, headers=headers, data=payload)
+    response = requests.request("POST", url, headers=headers, data=payload)
 
     return response.status_code, response.json()
 
 
-def get_data(properties, engagement_type, now, lag):
+def get_data(properties, object_type, now, lag):
     iterate = True
     after = None
     while iterate:
@@ -97,11 +100,11 @@ def get_data(properties, engagement_type, now, lag):
         try:
             # use current timestamp and lag
             status_code, data = get_http_response(now=now, properties=properties,
-                                                  engagement_type=engagement_type, lag=lag, limit=100, after=after)
+                                                  object_type=object_type, lag=lag, limit=100, after=after)
             # time stamp for the current interval
             utc_before = now-dt.timedelta(seconds=lag)
             logger.info(
-                f"{engagement_type}::lag interval timestamps {utc_before} :: {now}")
+                f"{object_type}::lag interval timestamps {utc_before} :: {now}")
         except Exception as e:
             print(e)
             logger.info("waiting few seconds before retrying")
@@ -119,7 +122,7 @@ def get_data(properties, engagement_type, now, lag):
                 # put data in kinesis stream
                 results = data.get("results")
 
-                logger.info(f"{engagement_type}::{data}")
+                logger.info(f"{object_type}::{data}")
 
             if not after:
                 iterate = False
@@ -143,37 +146,31 @@ def get_data(properties, engagement_type, now, lag):
     now = dt.datetime.now()
     lag = now - begin_time
 
-    return get_data(properties, engagement_type, now, lag.seconds)
+    return get_data(properties, object_type, now, lag.seconds)
 
 
-def poll_data(properties, engagement_type):
+def poll_data(properties, object_type):
     now = dt.datetime.now()
     lag = 10
-    get_data(properties, engagement_type, now, lag)
-
-
-class TestStreamEngagements(unittest.TestCase):
-    def test_load_variables(self):
-        self.assertIsNotNone(os.getenv("HS_TOKEN"))
-        self.assertIsNotNone(os.getenv("HS_TASK_PROPERTIES"))
-        self.assertIsNotNone(os.getenv("KINESIS_STREAM_NAME"))
+    get_data(properties, object_type, now, lag)
 
 
 if __name__ == "__main__":
-    engagements = ["tasks", "calls", "meetings", "emails"]
+
+    objects = ["contacts"]
     # engagements = ["tasks", "calls", "meetings", "emails", "communications"]
-    NUM_THREADS = len(engagements)
+    NUM_THREADS = len(objects)
 
     for t in range(NUM_THREADS):
 
         current_property = os.getenv(
-            f"HS_{engagements[t].upper()}_PROPERTIES")
+            f"HS_{objects[t].upper()}_PROPERTIES")
         if not current_property:
             raise Exception(f"Property Not Found :: {current_property}")
 
         properties = current_property.split("|")
         # Thread(target=poll_data, args=(properties, engagements[t])).start()
         p = multiprocessing.Process(
-            target=poll_data, args=(properties, engagements[t]))
+            target=poll_data, args=(properties, objects[t]))
         p.start()
-        print(f"{engagements[t]} PID {p.pid}")
+        print(f"{objects[t]} PID {p.pid}")
