@@ -6,7 +6,6 @@ import requests
 import time
 import boto3
 from botocore.exceptions import ClientError, EndpointConnectionError
-from dotenv import load_dotenv
 import unittest
 import logging
 from logging.handlers import RotatingFileHandler
@@ -16,7 +15,6 @@ import multiprocessing
 from queue import Queue
 
 # define connections
-load_dotenv()
 request_session = requests.Session()
 
 
